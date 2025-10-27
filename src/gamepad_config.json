@@ -1,0 +1,13 @@
+{
+  "cross": 0,
+  "circle": 1,
+  "square": 2,
+  "triangle": 3,
+  "l1": 9,
+  "r1": 10,
+  "share": 4,
+  "options": 6,
+  "ps": 5,
+  "l3": 7,
+  "r3": 8
+}
