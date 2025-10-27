@@ -70,7 +70,7 @@ class GamepadHandler:
 
         return {
             "left_stick": (left_x, left_y),
-            "right_stick": (right_x, right_y),
+            "right_stick": (right_x, -right_y),
             "l2": l2,
             "r2": r2,
             "buttons": buttons,
