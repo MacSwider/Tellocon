@@ -3,13 +3,40 @@ import sys
 import time
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QPushButton, QFrame, QTextEdit)
-from PyQt5.QtCore import QTimer
+from PyQt5.QtCore import QTimer, QThread, pyqtSignal
 from PyQt5.QtGui import QFont
 
 from src.tello_controller import TelloController
 from src.gamepad_handler import GamepadHandler
 from src.camera_widget import CameraWidget
 from src.video_thread import VideoThread
+
+
+class FlipThread(QThread):
+    """Thread to execute flip maneuvers without blocking the UI"""
+    finished = pyqtSignal(str)
+    
+    def __init__(self, tello_controller, direction):
+        super().__init__()
+        self.tello_controller = tello_controller
+        self.direction = direction
+    
+    def run(self):
+        try:
+            if self.direction == 'left':
+                success, message = self.tello_controller.flip_left()
+                if success:
+                    self.finished.emit("✓ Performed barrel roll left")
+                else:
+                    self.finished.emit(f"✗ {message}")
+            elif self.direction == 'right':
+                success, message = self.tello_controller.flip_right()
+                if success:
+                    self.finished.emit("✓ Performed barrel roll right")
+                else:
+                    self.finished.emit(f"✗ {message}")
+        except Exception as e:
+            self.finished.emit(f"✗ Flip error: {str(e)}")
 
 
 class MainWindow(QMainWindow):
@@ -20,6 +47,7 @@ class MainWindow(QMainWindow):
         self.video_thread = None
         self.current_throttle = 0
         self.current_rc_values = [0, 0, 0, 0]
+        self.flip_thread = None
 
         self.gamepad_timer = QTimer()
         self.gamepad_timer.timeout.connect(self.update_gamepad_input)
@@ -99,7 +127,9 @@ class MainWindow(QMainWindow):
             "• Left stick: Ascend/Descend, Rotate<br/>"
             "• Right stick: Forward/Backward, Left/Right<br/>"
             "• R1: Takeoff<br/>"
-            "• L1: Landing"
+            "• L1: Landing<br/>"
+            "• R2: Barrel Roll Right <br/>"
+            "• L2: Barrel Roll Left <br/>"
         )
         instructions.setStyleSheet("font-size: 11px; padding: 10px; background-color: white; border: 1px solid #ccc;")
         layout.addWidget(instructions)
@@ -201,6 +231,23 @@ class MainWindow(QMainWindow):
             self.tello_controller.land()
             self.log("Drone landed")
 
+    def execute_flip(self, direction):
+        """Execute a flip maneuver in a separate thread"""
+        if not self.tello_controller.connected:
+            return
+        
+        # Don't start a new flip if one is already in progress
+        if self.flip_thread and self.flip_thread.isRunning():
+            return
+        
+        self.flip_thread = FlipThread(self.tello_controller, direction)
+        self.flip_thread.finished.connect(self.on_flip_completed)
+        self.flip_thread.start()
+    
+    def on_flip_completed(self, message):
+        """Called when flip maneuver completes"""
+        self.log(message)
+
     def update_gamepad_input(self):
         if not self.tello_controller.connected:
             return
@@ -218,9 +265,9 @@ class MainWindow(QMainWindow):
         if buttons.get('l1') and not self._last_buttons.get('l1', 0):
             self.land()
         if buttons.get('r2') and not self._last_buttons.get('r2', 0):
-            self.tello_controller.rotate_right_90()
+            self.execute_flip('right')
         if buttons.get('l2') and not self._last_buttons.get('l2', 0):
-            self.tello_controller.rotate_left_90()
+            self.execute_flip('left')
 
         for key in ['r1', 'l1', 'r2', 'l2']:
             self._last_buttons[key] = buttons.get(key, 0)
@@ -240,6 +287,11 @@ class MainWindow(QMainWindow):
         self.log_text.append(f"[{timestamp}] {message}")
 
     def closeEvent(self, event):
+        # Stop flip thread if running
+        if self.flip_thread and self.flip_thread.isRunning():
+            self.flip_thread.terminate()
+            self.flip_thread.wait()
+        
         if self.tello_controller.connected:
             self.disconnect_drone()
         event.accept()

@@ -147,6 +147,13 @@ class CameraWidget(QLabel):
             painter.setPen(color_green if self.ui_info['controller'] else color_red)
             status = "Connected" if self.ui_info['controller'] else "Disconnected"
             painter.drawText(10, y_offset + 20, f"🎮 Controller: {status}")
+            y_offset += 25
+        
+        if 'flying_mode' in self.ui_info:
+            mode = self.ui_info['flying_mode']
+            mode_text = "Manual" if mode == "manual" else "Autopilot"
+            painter.setPen(color_white)
+            painter.drawText(10, y_offset + 20, f"✈️ Mode: {mode_text}")
 
     def clear(self):
         self.setPixmap(QPixmap())

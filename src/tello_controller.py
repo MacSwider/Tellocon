@@ -1,5 +1,6 @@
 from djitellopy import Tello
 import logging
+import time
 
 logging.getLogger('djitellopy').setLevel(logging.WARNING)
 
@@ -7,6 +8,7 @@ class TelloController:
     def __init__(self):
         self.tello = None
         self.connected = False
+        self.flipping = False
 
     def connect(self):
         try:
@@ -38,7 +40,7 @@ class TelloController:
             self.tello.land()
 
     def send_rc_control(self, left_right, forward_back, up_down, yaw):
-        if self.tello:
+        if self.tello and not self.flipping:
             self.tello.send_rc_control(
                 int(left_right),
                 int(forward_back),
@@ -106,10 +108,60 @@ class TelloController:
             return self.tello.get_yaw()
         return 0
 
-    def rotate_left_90(self):
-        if self.tello:
-            self.tello.rotate_counter_clockwise(90)
+    def flip_left(self):
+        """Perform a barrel roll to the left (roll axis spin)"""
+        if not self.tello:
+            return False, "Drone not connected"
+        
+        # Check if drone is flying and at sufficient height
+        try:
+            height = self.get_height()
+            if height < 80:
+                return False, f"Insufficient height: {height}cm (needs at least 80cm)"
+            
+            # Set flipping flag to stop RC control
+            self.flipping = True
+            
+            # Stop RC control to allow flip to execute
+            self.tello.send_rc_control(0, 0, 0, 0)
+            time.sleep(0.3)  # Give drone a moment to stabilize
+            
+            self.tello.flip('l')
+            
+            # Reset flipping flag
+            self.flipping = False
+            return True, "Flip left completed"
+        except Exception as e:
+            error_msg = str(e)
+            logging.error(f"Flip left error: {error_msg}")
+            self.flipping = False
+            return False, error_msg
 
-    def rotate_right_90(self):
-        if self.tello:
-            self.tello.rotate_clockwise(90)
+    def flip_right(self):
+        """Perform a barrel roll to the right (roll axis spin)"""
+        if not self.tello:
+            return False, "Drone not connected"
+        
+        # Check if drone is flying and at sufficient height
+        try:
+            height = self.get_height()
+            if height < 80:
+                return False, f"Insufficient height: {height}cm (needs at least 80cm)"
+            
+            # Set flipping flag to stop RC control
+            self.flipping = True
+            
+            # Stop RC control to allow flip to execute
+            self.tello.send_rc_control(0, 0, 0, 0)
+            time.sleep(0.3)  # Give drone a moment to stabilize
+            
+            self.tello.flip('r')
+            
+            # Reset flipping flag
+            self.flipping = False
+            return True, "Flip right completed"
+        except Exception as e:
+            error_msg = str(e)
+            logging.error(f"Flip right error: {error_msg}")
+            self.flipping = False
+            return False, error_msg
