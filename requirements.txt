@@ -3,4 +3,5 @@ opencv-python==4.8.1.78
 djitellopy==2.5.0
 PyQt5==5.15.10
 numpy==1.24.3
+bleak==1.1.1
 

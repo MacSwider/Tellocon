@@ -1,4 +1,5 @@
 import numpy as np
+import logging
 from PyQt5.QtCore import QThread, pyqtSignal
 
 class VideoThread(QThread):
@@ -17,7 +18,7 @@ class VideoThread(QThread):
             self.msleep(200)
             self.frame_read = self.tello.get_frame_read()
         except Exception as e:
-            print(f"Error initializing frame read: {e}")
+            logging.error(f"Error initializing frame read: {e}")
             self.running = False
             return
 
@@ -29,14 +30,14 @@ class VideoThread(QThread):
                         self.frame_signal.emit(frame_copy)
                 self.msleep(30)
             except Exception as e:
-                print(f"Video stream error: {e}")
+                logging.error(f"Video stream error: {e}")
                 break
-
+        
     def stop(self):
         self.running = False
         try:
             if self.tello:
                 self.tello.streamoff()
         except Exception as e:
-            print(f"Error stopping stream: {e}")
+            logging.error(f"Error stopping stream: {e}")
         self.wait()
