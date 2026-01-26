@@ -91,6 +91,8 @@ Move your sticks and press buttons to verify everything is working!
 
 ### Running the Full Application
 
+#### Option 1: Connect via Tello's Hotspot (Default)
+
 1. **Connect your computer to the drone's Wi-Fi hotspot:**
    - Make sure the drone is powered on
    - Connect your computer to the Wi-Fi network `TELLO-XXXX` (where XXXX is the unique code)
@@ -111,6 +113,62 @@ python main.py
 5. **Start controlling:**
    - Click "Takeoff" or use the R1 button on the controller
    - Control the drone using the joysticks
+
+#### Option 2: Connect via Your Computer's Hotspot (Swarm Mode)
+
+**Your Setup: LAN connected + WiFi hotspot active**
+
+**IMPORTANT:** When you connect to TELLO-XXXX, your hotspot may pause temporarily. You have two options:
+
+**Option A: Single WiFi Adapter (Hotspot may pause)**
+- Keep hotspot active (2.4GHz, SSID: MurderDroneTest)
+- Connect PC to TELLO-XXXX (hotspot may pause)
+- Configure Tello
+- Re-enable hotspot after configuration
+- Drone will connect when hotspot is active again
+
+**Option B: USB WiFi Dongle (RECOMMENDED - No interruption)**
+- Connect to TELLO-XXXX using USB WiFi dongle
+- Keep hotspot active on built-in WiFi adapter
+- No interruption to hotspot during configuration
+
+**Steps:**
+
+1. **Set up your hotspot:**
+   - Ensure LAN/Ethernet is connected (for internet)
+   - Create a 2.4GHz Wi-Fi hotspot on your WiFi adapter
+   - SSID: `MurderDroneTest`, Password: `54fatTTT`
+   - **CRITICAL:** Hotspot MUST be 2.4GHz (NOT 5GHz)
+
+2. **Configure the Tello:**
+   - Power on the Tello drone
+   - Connect your computer to TELLO-XXXX hotspot
+   - (If using single adapter, hotspot may pause - that's OK)
+   - Run the application: `python main.py`
+   - Click "Configure WiFi to Hotspot" button
+   - Credentials are pre-filled (MurderDroneTest / 54fatTTT)
+   - Click "Configure WiFi"
+   - Wait for confirmation message
+
+3. **Re-enable hotspot (if it was paused):**
+   - Go to Windows Settings > Network & Internet > Mobile hotspot
+   - Turn hotspot back ON if it was paused
+   - Ensure it's broadcasting on 2.4GHz
+
+4. **Wait for connection:**
+   - Wait 60-90 seconds for drone to reboot and connect
+   - Check your hotspot's connected devices
+   - The Tello should appear (may show as "unknown device")
+   - Drone LED should turn solid green when connected
+   - If LED keeps blinking yellow:
+     - Verify hotspot is 2.4GHz
+     - Check SSID/password match exactly (case-sensitive)
+     - Try resetting drone (hold power 5-10 seconds)
+
+5. **Connect to the drone:**
+   - Make sure you're connected to your hotspot (not TELLO-XXXX)
+   - Click "Connect with Drone" button
+   - The application will connect to the drone via your hotspot
 
 ## 🎮 Controls
 
