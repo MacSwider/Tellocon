@@ -3,6 +3,15 @@ import logging
 from bleak import BleakClient, BleakScanner
 from PyQt5.QtCore import QThread, pyqtSignal
 import re
+import sys
+
+# Fix Windows COM threading issues with PyQt5 and Bleak
+if sys.platform == 'win32':
+    try:
+        from bleak.backends.winrt.utils import allow_sta
+        allow_sta()
+    except ImportError:
+        pass
 
 logging.getLogger('bleak').setLevel(logging.WARNING)
 
@@ -24,13 +33,14 @@ The handler will automatically:
 class BluetoothHandler(QThread):
     """Handler for Bluetooth communication with ESP32"""
     heading_received = pyqtSignal(int)  # Emits heading value (0-359)
+    message_received = pyqtSignal(str)  # Emits raw message from ESP32
     connection_status = pyqtSignal(bool, str)  # Emits (connected, message)
     
-    # Common ESP32 BLE service UUIDs
-    ESP32_SERVICE_UUID = "0000ff00-0000-1000-8000-00805f9b34fb"
-    ESP32_CHARACTERISTIC_UUID = "0000ff01-0000-1000-8000-00805f9b34fb"
+    # ESP32C6 BLE service UUIDs (matching the Arduino code)
+    ESP32_SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+    ESP32_CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
     
-    def __init__(self, device_name_pattern="ESP32"):
+    def __init__(self, device_name_pattern="XIAO_ESP32C6"):
         super().__init__()
         self.device_name_pattern = device_name_pattern
         self.client = None
@@ -84,32 +94,62 @@ class BluetoothHandler(QThread):
                 self.connected = True
                 self.connection_status.emit(True, f"Connected to {target_device.name}")
                 
-                # Try to find the characteristic
-                services = await self.client.get_services()
+                # Wait a moment for services to be discovered
+                await asyncio.sleep(0.5)
+                
+                # Access services - try property first (Bleak 1.1.1+), then method if available
+                services = None
+                try:
+                    # In Bleak 1.1.1+, services is a property
+                    services = self.client.services
+                except AttributeError:
+                    # Fallback: try get_services() method if it exists (older versions)
+                    try:
+                        if hasattr(self.client, 'get_services'):
+                            services = await self.client.get_services()
+                    except Exception as e:
+                        logging.warning(f"Could not get services: {e}")
+                
                 characteristic = None
                 
-                # Look for the characteristic that can notify
-                for service in services:
-                    for char in service.characteristics:
-                        if "notify" in char.properties or "read" in char.properties:
-                            characteristic = char
-                            break
-                    if characteristic:
-                        break
-                
-                if characteristic:
-                    # Enable notifications if supported
-                    if "notify" in characteristic.properties:
-                        await self.client.start_notify(characteristic.uuid, self._notification_handler)
+                # Try to find characteristic by UUID first (faster and more reliable)
+                try:
+                    # Direct access to characteristic by UUID from ESP32 code
+                    await self.client.start_notify(self.ESP32_CHARACTERISTIC_UUID, self._notification_handler)
+                    logging.info(f"Successfully started notifications on {self.ESP32_CHARACTERISTIC_UUID}")
+                except Exception as e:
+                    logging.warning(f"Could not start notify on UUID {self.ESP32_CHARACTERISTIC_UUID}: {e}")
+                    
+                    # Fallback: search through services if available
+                    if services:
+                        try:
+                            # Look for the characteristic that can notify
+                            for service in services:
+                                for char in service.characteristics:
+                                    if "notify" in char.properties or "read" in char.properties:
+                                        characteristic = char
+                                        break
+                                if characteristic:
+                                    break
+                            
+                            if characteristic:
+                                # Enable notifications if supported
+                                if "notify" in characteristic.properties:
+                                    await self.client.start_notify(characteristic.uuid, self._notification_handler)
+                                    logging.info(f"Started notifications on characteristic {characteristic.uuid}")
+                                else:
+                                    # If notify not available, poll for data
+                                    asyncio.create_task(self._poll_data(characteristic))
+                            else:
+                                # No suitable characteristic found, try polling by UUID
+                                logging.warning("No suitable characteristic found, trying polling")
+                                asyncio.create_task(self._poll_data_by_uuid())
+                        except Exception as e2:
+                            logging.error(f"Error searching services: {e2}")
+                            asyncio.create_task(self._poll_data_by_uuid())
                     else:
-                        # If notify not available, poll for data
-                        asyncio.create_task(self._poll_data(characteristic))
-                else:
-                    # Try default UUIDs
-                    try:
-                        await self.client.start_notify(self.ESP32_CHARACTERISTIC_UUID, self._notification_handler)
-                    except:
-                        # If that fails, try to read from it periodically
+                        # Services not available, try polling by UUID
+                        logging.warning("Services not available, trying polling by UUID")
                         asyncio.create_task(self._poll_data_by_uuid())
                         
         except Exception as e:
@@ -124,6 +164,11 @@ class BluetoothHandler(QThread):
                 # Try to decode as text
                 try:
                     text = data.decode('utf-8').strip()
+                    # Print message to console/terminal
+                    print(f"[ESP32C6] Received message: {text}")
+                    # Emit raw message (for potential future use)
+                    self.message_received.emit(text)
+                    # Try to parse heading
                     heading = self._parse_heading(text)
                     if heading is not None:
                         self.heading_received.emit(heading)
@@ -133,6 +178,10 @@ class BluetoothHandler(QThread):
                         # Assume 16-bit integer (0-359)
                         heading = int.from_bytes(data[:2], byteorder='little')
                         if 0 <= heading <= 359:
+                            # Print message to console/terminal
+                            print(f"[ESP32C6] Received message (binary): {heading}")
+                            # Emit as text message
+                            self.message_received.emit(str(heading))
                             self.heading_received.emit(heading)
         except Exception as e:
             logging.error(f"Notification handler error: {e}")

@@ -252,6 +252,11 @@ class MainWindow(QMainWindow):
         self.bluetooth_status_label = QLabel("ESP32-C6: Disconnected")
         self.bluetooth_status_label.setStyleSheet("font-size: 12px; color: red;")
         layout.addWidget(self.bluetooth_status_label)
+        
+        self.esp32_message_label = QLabel("ESP32 Message: -")
+        self.esp32_message_label.setStyleSheet("font-size: 11px; color: #666; padding: 5px; background-color: white; border: 1px solid #ddd; border-radius: 3px;")
+        self.esp32_message_label.setWordWrap(True)
+        layout.addWidget(self.esp32_message_label)
         layout.addSpacing(20)
 
         instructions = QLabel(
@@ -540,6 +545,7 @@ class MainWindow(QMainWindow):
         try:
             self.bluetooth_handler = BluetoothHandler(device_name_pattern="XIAO")
             self.bluetooth_handler.heading_received.connect(self.on_heading_received)
+            self.bluetooth_handler.message_received.connect(self.on_esp32_message)
             self.bluetooth_handler.connection_status.connect(self.on_bluetooth_status)
             self.bluetooth_handler.start()
             self.log("Bluetooth handler started - searching for XIAO...")
@@ -551,14 +557,22 @@ class MainWindow(QMainWindow):
         """Handle heading data from ESP32"""
         self.current_heading = heading
     
+    def on_esp32_message(self, message):
+        """Handle raw message from ESP32 - messages are printed to console"""
+        # Messages are now printed to terminal/console instead of UI
+        # This method is kept for potential future use but doesn't update UI
+        pass
+    
     def on_bluetooth_status(self, connected, message):
         """Handle Bluetooth connection status updates"""
         if connected:
             self.bluetooth_status_label.setText(f"ESP32-C6: Connected")
             self.bluetooth_status_label.setStyleSheet("font-size: 12px; color: green;")
+            print(f"[ESP32C6] Connection status: {message}")
         else:
             self.bluetooth_status_label.setText(f"ESP32-C6: Disconnected")
             self.bluetooth_status_label.setStyleSheet("font-size: 12px; color: red;")
+            print(f"[ESP32C6] Connection status: {message}")
         self.log(f"Bluetooth: {message}")
 
     def log(self, message):
