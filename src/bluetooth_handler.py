@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import sys
 from bleak import BleakClient, BleakScanner
 from PyQt5.QtCore import QThread, pyqtSignal
 import re
@@ -26,9 +27,9 @@ class BluetoothHandler(QThread):
     heading_received = pyqtSignal(int)  # Emits heading value (0-359)
     connection_status = pyqtSignal(bool, str)  # Emits (connected, message)
     
-    # Common ESP32 BLE service UUIDs
-    ESP32_SERVICE_UUID = "0000ff00-0000-1000-8000-00805f9b34fb"
-    ESP32_CHARACTERISTIC_UUID = "0000ff01-0000-1000-8000-00805f9b34fb"
+    # UUID z firmware ESP32 (tello_esp32_gy271_ble.ino)
+    ESP32_SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+    ESP32_CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
     
     def __init__(self, device_name_pattern="ESP32"):
         super().__init__()
@@ -84,33 +85,54 @@ class BluetoothHandler(QThread):
                 self.connected = True
                 self.connection_status.emit(True, f"Connected to {target_device.name}")
                 
-                # Try to find the characteristic
-                services = await self.client.get_services()
+                # Try to find the characteristic (Bleak discovers services on connect)
+                services = self.client.services
                 characteristic = None
-                
-                # Look for the characteristic that can notify
+                # Standard GATT UUIDs do odfiltrowania (np. nazwa "nimble" = 0x2a00)
+                skip_uuids = ("2a00", "2a01", "2a04", "2a19", "2a24", "2a25", "2a26", "2a27", "2a28", "2a29", "2a2a")
+
+                def uuid_match(uuid_str, ref):
+                    if not uuid_str or not ref:
+                        return False
+                    s = str(uuid_str).lower().replace("-", "")
+                    r = str(ref).lower().replace("-", "")
+                    return s == r or s.endswith(r[-12:])
+
+                # 1) Szukaj charakterystyki z azymutem (UUID z ESP32 .ino)
                 for service in services:
                     for char in service.characteristics:
-                        if "notify" in char.properties or "read" in char.properties:
+                        if uuid_match(char.uuid, self.ESP32_CHARACTERISTIC_UUID):
                             characteristic = char
                             break
                     if characteristic:
                         break
+                # 2) Jeśli nie ma – weź pierwszą notify/read, ale nie nazwę urządzenia (nimble)
+                if not characteristic:
+                    for service in services:
+                        for char in service.characteristics:
+                            if uuid_short(char.uuid) in skip_uuids:
+                                continue
+                            if "notify" in char.properties or "read" in char.properties:
+                                characteristic = char
+                                break
+                        if characteristic:
+                            break
                 
                 if characteristic:
                     # Enable notifications if supported
                     if "notify" in characteristic.properties:
                         await self.client.start_notify(characteristic.uuid, self._notification_handler)
+                        print("[BLE] Subskrypcja: powiadomienia (notify)", flush=True)
                     else:
-                        # If notify not available, poll for data
                         asyncio.create_task(self._poll_data(characteristic))
+                        print("[BLE] Subskrypcja: odczyt co 100 ms (poll)", flush=True)
                 else:
-                    # Try default UUIDs
                     try:
                         await self.client.start_notify(self.ESP32_CHARACTERISTIC_UUID, self._notification_handler)
-                    except:
-                        # If that fails, try to read from it periodically
+                        print("[BLE] Subskrypcja: powiadomienia (UUID domyślne)", flush=True)
+                    except Exception:
                         asyncio.create_task(self._poll_data_by_uuid())
+                        print("[BLE] Subskrypcja: odczyt co 100 ms (UUID domyślne)", flush=True)
                         
         except Exception as e:
             logging.error(f"Connection error: {e}")
@@ -120,20 +142,38 @@ class BluetoothHandler(QThread):
     def _notification_handler(self, sender, data):
         """Handle incoming notifications from ESP32"""
         try:
-            if data:
-                # Try to decode as text
-                try:
-                    text = data.decode('utf-8').strip()
-                    heading = self._parse_heading(text)
-                    if heading is not None:
-                        self.heading_received.emit(heading)
-                except:
-                    # Try to parse as binary data
-                    if len(data) >= 2:
-                        # Assume 16-bit integer (0-359)
-                        heading = int.from_bytes(data[:2], byteorder='little')
-                        if 0 <= heading <= 359:
-                            self.heading_received.emit(heading)
+            if not data:
+                return
+            # Zawsze wypisz co przyszło (i wymuś flush), żeby w terminalu coś było widać
+            try:
+                text = data.decode('utf-8').strip()
+                preview = repr(text)[:60]
+            except Exception:
+                preview = ' '.join(f'{b:02x}' for b in data[:20])
+            print(f"[BLE] odebrano: {preview}", flush=True)
+            sys.stdout.flush()
+
+            try:
+                text = data.decode('utf-8').strip()
+                heading = self._parse_heading(text)
+                if heading is not None:
+                    print(f"Azymut: {heading}°", flush=True)
+                    sys.stdout.flush()
+                    self.heading_received.emit(heading)
+                    return
+            except Exception:
+                pass
+            if len(data) >= 2:
+                heading = int.from_bytes(data[:2], byteorder='little')
+                if 0 <= heading <= 359:
+                    print(f"Azymut: {heading}°", flush=True)
+                    sys.stdout.flush()
+                    self.heading_received.emit(heading)
+                elif 0 <= heading <= 360:
+                    h = 0 if heading == 360 else heading
+                    print(f"Azymut: {h}°", flush=True)
+                    sys.stdout.flush()
+                    self.heading_received.emit(h)
         except Exception as e:
             logging.error(f"Notification handler error: {e}")
     
@@ -163,13 +203,18 @@ class BluetoothHandler(QThread):
     
     def _parse_heading(self, text):
         """Parse heading value from text data"""
-        # Look for numbers in range 0-359
-        # Common formats: "heading: 123", "123", "H:123", etc.
-        numbers = re.findall(r'\d+', text)
-        for num_str in numbers:
-            num = int(num_str)
-            if 0 <= num <= 359:
-                return num
+        # Liczby 0-359 lub 0-360, także z kropką (np. 45.7)
+        # Formaty: "heading: 123", "123", "H:123", "45.7"
+        parts = re.findall(r'\d+\.?\d*', text)
+        for num_str in parts:
+            try:
+                num = int(round(float(num_str)))
+                if num == 360:
+                    num = 0
+                if 0 <= num <= 359:
+                    return num
+            except ValueError:
+                continue
         return None
     
     def stop(self):
