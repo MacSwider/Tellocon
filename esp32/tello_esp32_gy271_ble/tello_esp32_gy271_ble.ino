@@ -18,6 +18,10 @@ BLECharacteristic *pCharacteristic;
 /* ===== BMM150 ===== */
 BMM150 bmm;
 
+/* Kalibracja BMM150 - wklej wartosci z skryptu tello_esp32_bmm150_calib (Serial Monitor) */
+const float CALIB_OFFSET_X = 12.0450f;
+const float CALIB_OFFSET_Y = -207.2000f;
+
 /* ===== SETUP ===== */
 void setup() {
   Serial.begin(115200);
@@ -62,8 +66,8 @@ void setup() {
 void loop() {
   bmm.read_mag_data();
 
-  float x = bmm.raw_mag_data.raw_datax;
-  float y = bmm.raw_mag_data.raw_datay;
+  float x = (float)bmm.raw_mag_data.raw_datax - CALIB_OFFSET_X;
+  float y = (float)bmm.raw_mag_data.raw_datay - CALIB_OFFSET_Y;
 
   float azimuth = atan2f(y, x) * 180.0f / PI;
   if (azimuth < 0) azimuth += 360.0f;
