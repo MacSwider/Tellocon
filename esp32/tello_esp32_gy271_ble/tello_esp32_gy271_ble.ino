@@ -18,9 +18,10 @@ BLECharacteristic *pCharacteristic;
 /* ===== BMM150 ===== */
 BMM150 bmm;
 
-/* Kalibracja BMM150 - wklej wartosci z skryptu tello_esp32_bmm150_calib (Serial Monitor) */
-const float CALIB_OFFSET_X = 12.0450f;
-const float CALIB_OFFSET_Y = -207.2000f;
+/* Calibration BMM150 - paste values from tello_esp32_bmm150_calib (Serial Monitor) after 6-point calibration */
+const float CALIB_OFFSET_X = 12.3800f;
+const float CALIB_OFFSET_Y = -217.9233f;
+const float CALIB_OFFSET_Z = 123.2300f;
 
 /* ===== SETUP ===== */
 void setup() {
@@ -30,7 +31,7 @@ void setup() {
   Serial.println("XIAO ESP32-C6 + BMM150 + BLE");
 
   /* ===== I2C (XIAO PINS!) ===== */
-  Wire.begin(D4, D5);        // ⚠️ NIE 19/20
+  Wire.begin(D4, D5);        // guess who didn't read docs last time
   Wire.setClock(100000);
 
   /* ===== INIT BMM150 ===== */
@@ -66,26 +67,29 @@ void setup() {
 void loop() {
   bmm.read_mag_data();
 
-  float x = (float)bmm.raw_mag_data.raw_datax - CALIB_OFFSET_X;
-  float y = (float)bmm.raw_mag_data.raw_datay - CALIB_OFFSET_Y;
+  float mx = (float)bmm.raw_mag_data.raw_datax - CALIB_OFFSET_X;
+  float my = (float)bmm.raw_mag_data.raw_datay - CALIB_OFFSET_Y;
+  float mz = (float)bmm.raw_mag_data.raw_dataz - CALIB_OFFSET_Z;
 
-  float azimuth = atan2f(y, x) * 180.0f / PI;
-  if (azimuth < 0) azimuth += 360.0f;
-
-  char buf[16];
-  snprintf(buf, sizeof(buf), "%.1f", azimuth);
+  /* sending M:mx,my,mz - app calculates the azimuth based on pitch/roll from Tello */
+  char buf[32];
+  snprintf(buf, sizeof(buf), "M:%.2f,%.2f,%.2f", mx, my, mz);
 
   pCharacteristic->setValue(buf);
   pCharacteristic->notify();
 
-  Serial.print("Azimuth: ");
-  Serial.print(buf);
-  Serial.print(" | X:");
-  Serial.print(x);
+  float azimuth = atan2f(my, mx) * 180.0f / PI;
+  if (azimuth < 0) azimuth += 360.0f;
+  Serial.print("Mag X:");
+  Serial.print(mx);
   Serial.print(" Y:");
-  Serial.println(y);
+  Serial.print(my);
+  Serial.print(" Z:");
+  Serial.print(mz);
+  Serial.print(" | az(withouth tilt): ");
+  Serial.println(azimuth);
 
-  delay(200);
+  delay(100);
 }
 
 

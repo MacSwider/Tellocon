@@ -1,7 +1,8 @@
-
+import math
 import sys
 import time
 import logging
+from datetime import datetime
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QPushButton, QFrame, QTextEdit,
                              QDialog, QLineEdit, QMessageBox)
@@ -16,6 +17,29 @@ from src.bluetooth_handler import BluetoothHandler
 
 # Configure logging
 logging.basicConfig(level=logging.WARNING)
+
+
+def tilt_compensated_heading(mx, my, mz, pitch_deg, roll_deg):
+    """
+    Oblicza azymut (0-359) z wektora magnetycznego (mx, my, mz) z kompensacją przechylenia.
+    pitch_deg, roll_deg: kąty z Tellera w stopniach (pitch = nos w górę/dół, roll = skrzydło).
+    Formuła NXP: rzut wektora B z układu pochylonego na płaszczyznę poziomą, potem atan2.
+    """
+    pitch_deg = pitch_deg if pitch_deg is not None else 0
+    roll_deg = roll_deg if roll_deg is not None else 0
+    theta = math.radians(pitch_deg)
+    phi = math.radians(roll_deg)
+    # Poziome składowe wektora B (roll=φ wokół X, pitch=θ wokół Y)
+    x_level = (
+        mx * math.cos(theta)
+        + my * math.sin(theta) * math.sin(phi)
+        + mz * math.sin(theta) * math.cos(phi)
+    )
+    y_level = my * math.cos(phi) - mz * math.sin(phi)
+    h = math.degrees(math.atan2(y_level, x_level))
+    if h < 0:
+        h += 360.0
+    return h
 
 
 class FlipThread(QThread):
@@ -145,10 +169,93 @@ class MainWindow(QMainWindow):
         self.wifi_config_thread = None
         self.bluetooth_handler = None
         self.current_heading = None
+        self.filtered_heading = None
+        self.raw_mag = None  # (mx, my, mz) from ESP32 for tilt-compensated heading
+        self.demo_active = False
+        self.demo_start_heading = None
+        self.demo_start_time = None
+        self.demo_last_time = None
+
+        # ── DEMO orbit parameters (tune these for your environment) ──
+        self.DEMO_YAW_RATE = 12.0           # deg/s – heading change rate (360/12 = 30s per circle)
+        self.DEMO_FORWARD_RC = 30           # forward RC value (≈ forward speed; higher = wider circle)
+        self.DEMO_TARGET_HEIGHT = 80        # cm – lower is more stable for Tello
+        self.DEMO_STABILIZE_TIME = 3.0      # seconds to hover before orbit starts
+        self.DEMO_K_YAW = 0.6              # P-gain: heading error → yaw command
+        self.DEMO_K_ALT = 0.5              # P-gain: altitude error → up/down
+        self.DEMO_MAX_YAW_CMD = 35         # max abs yaw RC command
+        self.DEMO_MAX_ALT_CMD = 30         # max abs altitude RC command
+        self.DEMO_MAX_HEADING_ERR = 45.0   # clamp heading error to prevent violent corrections
+        self.DEMO_RC_SMOOTH = 0.3          # RC output EMA smoothing (0 = none, higher = smoother)
+        self.demo_cumulative_turn = 0.0    # total degrees turned (for circle counting)
+        self.demo_prev_heading = None
+
+        self.debug_log_file = None
+        self.debug_log_header_written = False
+
+        self.demo_timer = QTimer()
+        self.demo_timer.timeout.connect(self.update_demo)
 
         self.init_ui()
         self.init_bluetooth()
         self.init_gamepad()
+
+        self._init_debug_log()
+
+    def _init_debug_log(self):
+        """Initialize CSV log file for DEMO + magnetometer debug."""
+        try:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"demo_mag_log_{ts}.csv"
+            self.debug_log_file = open(filename, "w", encoding="utf-8")
+            header = (
+                "timestamp,demo_active,"
+                "pitch,roll,yaw_tello,"
+                "mx,my,mz,heading,"
+                "height,tof,speed_z,"
+                "rc_left_right,rc_forward_back,rc_up_down,rc_yaw\n"
+            )
+            self.debug_log_file.write(header)
+            self.debug_log_file.flush()
+            self.debug_log_header_written = True
+            self.log(f"Debug log file created: {filename}")
+        except Exception as e:
+            self.log(f"Debug log init failed: {e}")
+
+    def _write_debug_log_row(
+        self,
+        pitch,
+        roll,
+        yaw_tello,
+        mx,
+        my,
+        mz,
+        heading,
+        height,
+        tof,
+        speed_z,
+        rc_left_right,
+        rc_forward_back,
+        rc_up_down,
+        rc_yaw,
+    ):
+        """Write one line of debug data to CSV (only used when DEMO is active)."""
+        if not self.debug_log_file:
+            return
+        try:
+            ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            line = (
+                f"{ts},{int(self.demo_active)},"
+                f"{pitch},{roll},{yaw_tello},"
+                f"{mx},{my},{mz},{heading},"
+                f"{height},{tof},{speed_z},"
+                f"{rc_left_right},{rc_forward_back},{rc_up_down},{rc_yaw}\n"
+            )
+            self.debug_log_file.write(line)
+            # lekkie flush, żeby w razie kraksy mieć dane
+            self.debug_log_file.flush()
+        except Exception:
+            pass
     
     def init_gamepad(self):
         """Initialize gamepad handler after UI is ready"""
@@ -239,6 +346,13 @@ class MainWindow(QMainWindow):
         self.land_btn.setStyleSheet("font-size: 14px; padding: 10px; background-color: #f44336; color: white;")
         layout.addWidget(self.land_btn)
 
+        # DEMO button – autonomous orbit using compass
+        self.demo_btn = QPushButton("DEMO")
+        self.demo_btn.clicked.connect(self.toggle_demo)
+        self.demo_btn.setEnabled(False)
+        self.demo_btn.setStyleSheet("font-size: 14px; padding: 10px; background-color: #9C27B0; color: white;")
+        layout.addWidget(self.demo_btn)
+
         layout.addSpacing(30)
 
         status_title = QLabel("Status:")
@@ -286,6 +400,7 @@ class MainWindow(QMainWindow):
                 self.connect_btn.setText("Disconnect Drone")
                 self.takeoff_btn.setEnabled(True)
                 self.land_btn.setEnabled(True)
+                self.demo_btn.setEnabled(True)
                 self.status_label.setText("Connected")
                 self.status_label.setStyleSheet("font-size: 12px; color: green;")
                 self.start_video_stream()
@@ -305,6 +420,11 @@ class MainWindow(QMainWindow):
         self.connect_btn.setText("Connect with Drone")
         self.takeoff_btn.setEnabled(False)
         self.land_btn.setEnabled(False)
+        self.demo_btn.setEnabled(False)
+        self.demo_btn.setText("DEMO")
+        self.demo_active = False
+        if self.demo_timer.isActive():
+            self.demo_timer.stop()
         self.status_label.setText("Disconnected")
         self.status_label.setStyleSheet("font-size: 12px; color: red;")
 
@@ -380,7 +500,49 @@ class MainWindow(QMainWindow):
             left_right, forward_back, up_down, yaw = self.current_rc_values
         except Exception:
             left_right, forward_back, up_down, yaw = [0, 0, 0, 0]
-        
+
+        # Tilt-compensated heading from magnetometer vector + Tello pitch/roll
+        if self.raw_mag is not None:
+            try:
+                if abs(pitch) <= 25 and abs(roll) <= 25:
+                    h = tilt_compensated_heading(
+                        self.raw_mag[0], self.raw_mag[1], self.raw_mag[2],
+                        pitch, roll
+                    )
+                    h = int(round(h)) % 360
+                    self.current_heading = h
+                    if self.filtered_heading is None:
+                        self.filtered_heading = float(h)
+                    else:
+                        alpha = 0.35
+                        diff = ((h - self.filtered_heading + 540) % 360) - 180
+                        self.filtered_heading = (self.filtered_heading + alpha * diff) % 360
+            except Exception:
+                pass
+
+        # Debug log: tylko podczas DEMO, żeby zobaczyć co robi kompas i sterowanie
+        if self.demo_active:
+            if self.raw_mag is not None:
+                mx, my, mz = self.raw_mag
+            else:
+                mx = my = mz = ""
+            self._write_debug_log_row(
+                pitch=pitch,
+                roll=roll,
+                yaw_tello=yaw_angle,
+                mx=mx,
+                my=my,
+                mz=mz,
+                heading=self.current_heading if self.current_heading is not None else "",
+                height=height,
+                tof=tof_distance,
+                speed_z=speed_z,
+                rc_left_right=left_right,
+                rc_forward_back=forward_back,
+                rc_up_down=up_down,
+                rc_yaw=yaw,
+            )
+
         self.camera_widget.set_ui_info({
             'battery': battery,
             'height': height,
@@ -396,8 +558,145 @@ class MainWindow(QMainWindow):
             'rc_yaw': yaw,             # RC control yaw
             'status': 'Active',
             'controller': self.gamepad.is_connected() if self.gamepad else False,
-            'heading': self.current_heading  # Heading from ESP32 GY-271
+            'flying_mode': 'autopilot' if self.demo_active else 'manual',
+            'heading': int(round(self.filtered_heading)) % 360 if self.filtered_heading is not None else self.current_heading
         })
+
+    def toggle_demo(self):
+        """Toggle DEMO mode: autonomous orbit using compass heading."""
+        if not self.tello_controller.connected:
+            self.log("DEMO: Drone not connected")
+            return
+
+        if not self.demo_active:
+            # ── Start DEMO ──
+            try:
+                height = self.tello_controller.get_height()
+            except Exception:
+                height = 0
+
+            if height < 20:
+                self.log("DEMO: Takeoff")
+                try:
+                    self.tello_controller.takeoff()
+                except Exception as e:
+                    self.log(f"DEMO: Takeoff failed: {e}")
+                    return
+
+            self.demo_active = True
+            self.demo_btn.setText("Stop DEMO")
+            self.demo_start_time = time.time()
+            self.demo_last_time = self.demo_start_time
+            self.demo_cumulative_turn = 0.0
+            self.demo_prev_heading = None
+
+            heading = self.filtered_heading if self.filtered_heading is not None else self.current_heading
+            self.demo_start_heading = heading if heading is not None else 0
+
+            if not self.demo_timer.isActive():
+                self.demo_timer.start(50)
+
+            self.log(f"DEMO: Orbit started  heading={self.demo_start_heading:.0f}°  "
+                     f"yaw_rate={self.DEMO_YAW_RATE}°/s  fwd={self.DEMO_FORWARD_RC}")
+        else:
+            # ── Stop DEMO and land ──
+            self.demo_active = False
+            self.demo_btn.setText("DEMO")
+            if self.demo_timer.isActive():
+                self.demo_timer.stop()
+            self.demo_last_time = None
+            try:
+                self.tello_controller.send_rc_control(0, 0, 0, 0)
+            except Exception:
+                pass
+            turns = abs(self.demo_cumulative_turn) / 360.0
+            if self.tello_controller.connected:
+                try:
+                    self.tello_controller.land()
+                    self.log(f"DEMO: Stopped and landed  ({turns:.1f} circles)")
+                except Exception as e:
+                    self.log(f"DEMO: Landing failed: {e}")
+
+    def update_demo(self):
+        """Compass-driven orbit: constant forward + heading tracking = circle.
+
+        The drone flies forward at constant speed while turning at a steady
+        yaw rate controlled by the compass heading.  R = v / ω  gives the
+        orbit radius.  No XY odometry needed.
+        """
+        if not self.demo_active or not self.tello_controller.connected:
+            return
+
+        try:
+            height = self.tello_controller.get_height()
+        except Exception:
+            height = 0
+
+        heading = self.filtered_heading if self.filtered_heading is not None else self.current_heading
+        if heading is None:
+            heading = self.demo_start_heading
+
+        now = time.time()
+        if self.demo_last_time is None:
+            dt = 0.05
+        else:
+            dt = max(min(now - self.demo_last_time, 0.2), 0.01)
+        self.demo_last_time = now
+
+        t_rel = now - self.demo_start_time
+
+        # ── Altitude hold ──
+        h_err = self.DEMO_TARGET_HEIGHT - height
+        up_down = int(max(min(self.DEMO_K_ALT * h_err, self.DEMO_MAX_ALT_CMD),
+                         -self.DEMO_MAX_ALT_CMD))
+
+        # ── Phase 1: Stabilise at target height before orbiting ──
+        if t_rel < self.DEMO_STABILIZE_TIME:
+            left_right, forward_back, yaw = 0, 0, 0
+        else:
+            # ── Phase 2: Orbit ──
+            orbit_t = t_rel - self.DEMO_STABILIZE_TIME
+
+            target_heading = (self.demo_start_heading
+                              + self.DEMO_YAW_RATE * orbit_t) % 360.0
+
+            err = target_heading - heading
+            if err > 180:
+                err -= 360
+            elif err < -180:
+                err += 360
+
+            err = max(min(err, self.DEMO_MAX_HEADING_ERR),
+                      -self.DEMO_MAX_HEADING_ERR)
+
+            yaw_raw = self.DEMO_K_YAW * err
+            yaw = int(max(min(yaw_raw, self.DEMO_MAX_YAW_CMD),
+                          -self.DEMO_MAX_YAW_CMD))
+
+            fwd_scale = max(0.65, 1.0 - abs(err) / 90.0)
+            forward_back = int(self.DEMO_FORWARD_RC * fwd_scale)
+            left_right = 0
+
+        # ── Track cumulative turn for circle counting ──
+        if self.demo_prev_heading is not None and heading is not None:
+            dh = ((heading - self.demo_prev_heading + 540) % 360) - 180
+            self.demo_cumulative_turn += dh
+        self.demo_prev_heading = heading
+
+        # ── Smooth RC outputs (EMA) ──
+        s = self.DEMO_RC_SMOOTH
+        prev = self.current_rc_values
+        left_right   = int(prev[0] * s + left_right   * (1 - s))
+        forward_back = int(prev[1] * s + forward_back * (1 - s))
+        up_down      = int(prev[2] * s + up_down      * (1 - s))
+        yaw          = int(prev[3] * s + yaw          * (1 - s))
+
+        self.current_rc_values = [left_right, forward_back, up_down, yaw]
+        try:
+            self.tello_controller.send_rc_control(left_right, forward_back,
+                                                  up_down, yaw)
+        except Exception as e:
+            self.log(f"DEMO: RC error: {e}")
 
     def takeoff(self):
         if self.tello_controller.connected:
@@ -490,7 +789,7 @@ class MainWindow(QMainWindow):
                                message.replace('\n', '<br/>'))
 
     def update_gamepad_input(self):
-        if not self.tello_controller.connected:
+        if not self.tello_controller.connected or self.demo_active:
             return
         
         if self.gamepad is None:
@@ -539,6 +838,7 @@ class MainWindow(QMainWindow):
         """Initialize Bluetooth handler for ESP32-C6"""
         try:
             self.bluetooth_handler = BluetoothHandler(device_name_pattern="XIAO")
+            self.bluetooth_handler.mag_received.connect(self.on_mag_received)
             self.bluetooth_handler.heading_received.connect(self.on_heading_received)
             self.bluetooth_handler.connection_status.connect(self.on_bluetooth_status)
             self.bluetooth_handler.start()
@@ -547,8 +847,12 @@ class MainWindow(QMainWindow):
             logging.error(f"Error initializing Bluetooth handler: {e}")
             self.log(f"Warning: Bluetooth initialization failed: {e}")
     
+    def on_mag_received(self, mx, my, mz):
+        """Store magnetometer vector from ESP32 for tilt-compensated heading"""
+        self.raw_mag = (mx, my, mz)
+
     def on_heading_received(self, heading):
-        """Handle heading data from ESP32"""
+        """Handle heading data from ESP32 (fallback when M: not sent)"""
         self.current_heading = heading
     
     def on_bluetooth_status(self, connected, message):
@@ -610,6 +914,12 @@ class MainWindow(QMainWindow):
                     import pygame
                     pygame.quit()
                 except:
+                    pass
+            # Close debug log file
+            if self.debug_log_file:
+                try:
+                    self.debug_log_file.close()
+                except Exception:
                     pass
         except Exception as e:
             logging.error(f"Error in closeEvent: {e}")

@@ -11,6 +11,7 @@ logging.getLogger('bleak').setLevel(logging.WARNING)
 Bluetooth Handler for ESP32 with GY-271 magnetometer
 
 Expected ESP32 data format (one of):
+- Text: "M:mx,my,mz" – magnetometer vector (float, float, float) for tilt-compensated heading in app
 - Text: "heading: 123" or "123" or "H:123" (heading 0-359)
 - Binary: 16-bit integer (little-endian) representing heading 0-359
 
@@ -24,7 +25,8 @@ The handler will automatically:
 
 class BluetoothHandler(QThread):
     """Handler for Bluetooth communication with ESP32"""
-    heading_received = pyqtSignal(int)  # Emits heading value (0-359)
+    heading_received = pyqtSignal(int)  # Emits heading value (0-359) – legacy / fallback
+    mag_received = pyqtSignal(float, float, float)  # Emits (mx, my, mz) for tilt compensation
     connection_status = pyqtSignal(bool, str)  # Emits (connected, message)
     
     # UUID z firmware ESP32 (tello_esp32_gy271_ble.ino)
@@ -155,6 +157,11 @@ class BluetoothHandler(QThread):
 
             try:
                 text = data.decode('utf-8').strip()
+                mag = self._parse_mag(text)
+                if mag is not None:
+                    mx, my, mz = mag
+                    self.mag_received.emit(mx, my, mz)
+                    return
                 heading = self._parse_heading(text)
                 if heading is not None:
                     print(f"Azymut: {heading}°", flush=True)
@@ -201,6 +208,16 @@ class BluetoothHandler(QThread):
                 logging.error(f"Poll by UUID error: {e}")
                 await asyncio.sleep(1)
     
+    def _parse_mag(self, text):
+        """Parse magnetometer vector M:mx,my,mz (for tilt compensation). Returns (mx, my, mz) or None."""
+        m = re.match(r'^\s*M:\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*$', text.strip())
+        if m:
+            try:
+                return (float(m.group(1)), float(m.group(2)), float(m.group(3)))
+            except ValueError:
+                pass
+        return None
+
     def _parse_heading(self, text):
         """Parse heading value from text data"""
         # Liczby 0-359 lub 0-360, także z kropką (np. 45.7)
