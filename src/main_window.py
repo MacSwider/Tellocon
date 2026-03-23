@@ -514,9 +514,12 @@ class MainWindow(QMainWindow):
                     if self.filtered_heading is None:
                         self.filtered_heading = float(h)
                     else:
-                        alpha = 0.35
+                        alpha = 0.12
                         diff = ((h - self.filtered_heading + 540) % 360) - 180
-                        self.filtered_heading = (self.filtered_heading + alpha * diff) % 360
+                        step = alpha * diff
+                        max_step = 3.0
+                        step = max(min(step, max_step), -max_step)
+                        self.filtered_heading = (self.filtered_heading + step) % 360
             except Exception:
                 pass
 
@@ -668,6 +671,10 @@ class MainWindow(QMainWindow):
 
             err = max(min(err, self.DEMO_MAX_HEADING_ERR),
                       -self.DEMO_MAX_HEADING_ERR)
+
+            deadband = 4.0
+            if abs(err) < deadband:
+                err = 0.0
 
             yaw_raw = self.DEMO_K_YAW * err
             yaw = int(max(min(yaw_raw, self.DEMO_MAX_YAW_CMD),
