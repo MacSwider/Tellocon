@@ -1,28 +1,33 @@
 """
-Bluetooth Low Energy handler for ESP32 + BMM150 magnetometer.
+Bluetooth Low Energy handler for ESP32 + GY-80 (9-DOF IMU).
 
 Connects to an ESP32 (e.g. XIAO ESP32-C6) over BLE and receives
-magnetometer data used for heading computation.
+IMU sensor data used for heading computation and orientation estimation.
 
 Data formats accepted from the ESP32 firmware:
-    Text "M:mx,my,mz"   -- calibrated magnetometer vector (preferred).
+    Text "D:mx,my,mz,ax,ay,az,gx,gy,gz"  -- full 9-DOF packet (GY-80).
+    Text "M:mx,my,mz"   -- magnetometer vector only (BMM150, backward compat).
     Text "H:123" / "123" -- pre-computed heading 0-359 (fallback).
     Binary 2 bytes LE    -- heading as uint16 (legacy).
 
 Signals emitted (PyQt5):
-    mag_received(float, float, float)  -- raw (mx, my, mz) vector.
-    heading_received(int)              -- pre-computed heading 0-359.
-    connection_status(bool, str)       -- (connected?, human-readable message).
+    mag_received(float, float, float)    -- (mx, my, mz) magnetometer vector.
+    accel_received(float, float, float)  -- (ax, ay, az) accelerometer in g.
+    gyro_received(float, float, float)   -- (gx, gy, gz) gyroscope in deg/s.
+    heading_received(int)                -- pre-computed heading 0-359.
+    connection_status(bool, str)         -- (connected?, human-readable message).
 
-BLE service / characteristic UUIDs are defined in the ESP32 firmware
-(tello_esp32_gy271_ble.ino) and mirrored here as class constants.
+When the ESP32 sends a "D:" packet, all three sensor signals are emitted.
+When only "M:" is received (old BMM150 firmware), only mag_received fires.
 
 Usage example:
     handler = BluetoothHandler(device_name_pattern="XIAO")
-    handler.mag_received.connect(my_callback)
-    handler.start()           # runs its own asyncio event loop in a QThread
+    handler.mag_received.connect(on_mag)
+    handler.accel_received.connect(on_accel)
+    handler.gyro_received.connect(on_gyro)
+    handler.start()
     ...
-    handler.stop()            # graceful shutdown
+    handler.stop()
 """
 
 import asyncio
@@ -44,14 +49,17 @@ _STANDARD_GATT_UUIDS = frozenset((
 
 
 class BluetoothHandler(QThread):
-    """BLE client that receives magnetometer data from an ESP32.
+    """BLE client that receives 9-DOF IMU data from an ESP32 + GY-80.
 
     Runs an asyncio event loop in a dedicated thread.  Automatically
     scans, connects, and subscribes to notifications.  Reconnects on
-    connection loss.
+    connection loss.  Backward-compatible with the old BMM150-only
+    firmware (M: format).
     """
 
     mag_received = pyqtSignal(float, float, float)
+    accel_received = pyqtSignal(float, float, float)
+    gyro_received = pyqtSignal(float, float, float)
     heading_received = pyqtSignal(int)
     connection_status = pyqtSignal(bool, str)
 
@@ -163,6 +171,13 @@ class BluetoothHandler(QThread):
             return
         try:
             text = data.decode("utf-8").strip()
+            imu = self._parse_imu(text)
+            if imu is not None:
+                mx, my, mz, ax, ay, az, gx, gy, gz = imu
+                self.mag_received.emit(mx, my, mz)
+                self.accel_received.emit(ax, ay, az)
+                self.gyro_received.emit(gx, gy, gz)
+                return
             mag = self._parse_mag(text)
             if mag is not None:
                 self.mag_received.emit(*mag)
@@ -193,8 +208,25 @@ class BluetoothHandler(QThread):
 
     # ----- Parsers -----
 
+    _IMU_RE = re.compile(
+        r"^\s*D:\s*"
+        r"([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,"   # mx, my, mz
+        r"\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*," # ax, ay, az
+        r"\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*$" # gx, gy, gz
+    )
+
     _MAG_RE = re.compile(
         r"^\s*M:\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*$")
+
+    def _parse_imu(self, text):
+        """Parse 'D:mx,my,mz,ax,ay,az,gx,gy,gz'. Returns 9-tuple or None."""
+        m = self._IMU_RE.match(text.strip())
+        if m:
+            try:
+                return tuple(float(m.group(i)) for i in range(1, 10))
+            except ValueError:
+                pass
+        return None
 
     def _parse_mag(self, text):
         """Parse 'M:mx,my,mz' vector. Returns (mx, my, mz) or None."""
